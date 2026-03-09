@@ -7,92 +7,68 @@
 .DESCRIPTION
     Iterates through every Azure subscription, queries all Recovery Services Vaults,
     extracts Protected Items and identifies resources that are not protected by backup.
-    Exports results into an Excel report with multiple worksheets.
+    Use -ExportToExcel to export results into an Excel report with multiple worksheets;
+    otherwise the function returns a hashtable containing the collected data as PowerShell objects.
+
+.PARAMETER ExportToExcel
+    Switch to export the inventory to an Excel file.
+    When omitted, the function returns a hashtable with keys BackupInventory, BackupPolicies,
+    UnprotectedResources, and PolicyDistribution.
 
 .OUTPUTS
-    Azure_Backup_Global_Report.xlsx with worksheets for backup inventory, policies, and unprotected resources.
+    When -ExportToExcel is used: Azure_Backup_Global_Report.xlsx with multiple worksheets.
+    Otherwise: hashtable with keys BackupInventory, BackupPolicies, UnprotectedResources, PolicyDistribution.
 #>
 
 function Export-AzureBackupInventory {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [string]$OutputPath
+        [switch]$ExportToExcel
     )
 
     $ErrorActionPreference = 'Stop'
 
-    # Generate timestamped filename if not provided
-    if (-not $OutputPath) {
-        $now = Get-Date -Format 'yyyy-MM-dd_HHmmss'
-        $OutputPath = "$($env:USERPROFILE)\$now-Azure_Backup_Global_Report.xlsx"
-    }
-
-    # ---------------------------------------------------------------------------
-    # 1. Ensure we have an active Azure session
-    # ---------------------------------------------------------------------------
-    Write-Host '=== Azure Backup Global Inventory ===' -ForegroundColor Cyan
-    Write-Host ''
-
     $context = Get-AzContext -ErrorAction SilentlyContinue
     if (-not $context) {
-        Write-Host '[INFO] No active Azure session found. Launching interactive login...' -ForegroundColor Yellow
-        Connect-AzAccount | Out-Null
+        Write-Host 'No active Azure session, launching login...' -ForegroundColor Yellow
+        $null = Connect-AzAccount
     }
 
-    # ---------------------------------------------------------------------------
-    # 2. Retrieve all accessible subscriptions
-    # ---------------------------------------------------------------------------
-    Write-Host '[INFO] Retrieving subscription list...' -ForegroundColor Yellow
     $subscriptions = Get-AzSubscription -ErrorAction Stop | Where-Object { $_.State -eq 'Enabled' }
-    Write-Host "[INFO] Found $($subscriptions.Count) enabled subscription(s)." -ForegroundColor Green
-    Write-Host ''
+    Write-Host "$($subscriptions.Count) subscription(s) found." -ForegroundColor Cyan
 
-    # ---------------------------------------------------------------------------
-    # 3. Iterate subscriptions and collect backup items
-    # ---------------------------------------------------------------------------
-    [System.Collections.Generic.List[PSCustomObject]]$backupInventory = @()
-    [System.Collections.Generic.List[PSCustomObject]]$backupPolicies = @()
-    [System.Collections.Generic.List[PSCustomObject]]$unprotectedResources = @()
+    [System.Collections.Generic.List[Object]]$backupInventory = @()
+    [System.Collections.Generic.List[Object]]$backupPolicies = @()
+    [System.Collections.Generic.List[Object]]$unprotectedResources = @()
     $subIndex = 0
 
     foreach ($sub in $subscriptions) {
         $subIndex++
         Write-Verbose "[LOOP] Starting subscription loop $subIndex of $($subscriptions.Count): $($sub.Name)"
-        Write-Host "[PROGRESS] Scanning subscription $subIndex/$($subscriptions.Count)" -ForegroundColor Magenta
+        Write-Host "[$subIndex/$($subscriptions.Count)] $($sub.Name)" -ForegroundColor Cyan
 
         try {
-            Write-Host "[$subIndex/$($subscriptions.Count)] Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
-
-            # Set the working subscription context
-            Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
-
-            # Discover all Recovery Services Vaults in this subscription
+            $null = Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop
             $vaults = Get-AzRecoveryServicesVault -ErrorAction Stop
 
             if ($vaults.Count -eq 0) {
-                Write-Host '  -> No Recovery Services Vaults found. Skipping.' -ForegroundColor DarkGray
+                Write-Verbose "No vaults found in '$($sub.Name)'."
                 continue
             }
 
-            Write-Host "  -> Found $($vaults.Count) vault(s)." -ForegroundColor Green
+            Write-Verbose "$($vaults.Count) vault(s) in '$($sub.Name)'"
 
             $vaultIndex = 0
             foreach ($vault in $vaults) {
                 $vaultIndex++
                 Write-Verbose "[LOOP] Starting vault loop $vaultIndex of $($vaults.Count): $($vault.Name)"
-                Write-Host "     Vault: $($vault.Name) (RG: $($vault.ResourceGroupName))" -ForegroundColor White
 
-                # Set vault context for backup cmdlets
-                Set-AzRecoveryServicesVaultContext -Vault $vault -ErrorAction Stop
-                Write-Host '       Scanning containers...' -ForegroundColor DarkGray
-
-                # Get backup policies for this vault
-                Write-Host '       Retrieving backup policies...' -ForegroundColor DarkGray
+                $null = Set-AzRecoveryServicesVaultContext -Vault $vault -ErrorAction Stop
                 try {
                     $policies = Get-AzRecoveryServicesBackupProtectionPolicy -VaultId $vault.ID -ErrorAction SilentlyContinue
                     if ($policies) {
-                        Write-Host "         -> Found $($policies.Count) backup policy(ies)" -ForegroundColor DarkGray
+                        Write-Verbose "Found $($policies.Count) backup policy(ies)"
                         foreach ($policy in $policies) {
                             # Extract schedule information
                             $scheduleFrequency = ''
@@ -170,10 +146,9 @@ function Export-AzureBackupInventory {
                     }
                 }
                 catch {
-                    Write-Host "         [WARN] Could not retrieve backup policies: $($_.Exception.Message)" -ForegroundColor DarkYellow
+                    Write-Warning "Could not retrieve backup policies: $($_.Exception.Message)"
                 }
 
-                # Query containers for all workload types we care about
                 $containerTypes = @(
                     'AzureVM'
                     'AzureSQL'
@@ -182,7 +157,7 @@ function Export-AzureBackupInventory {
                     'Windows'
                 )
 
-                [System.Collections.Generic.List[PSCustomObject]]$allItems = @()
+                [System.Collections.Generic.List[Object]]$allItems = @()
 
                 $containerTypeIndex = 0
                 foreach ($containerType in $containerTypes) {
@@ -197,11 +172,11 @@ function Export-AzureBackupInventory {
                         $containers = Get-AzRecoveryServicesBackupContainer @containerParams
 
                         if (-not $containers) { 
-                            Write-Host "         -> No containers found for type '$containerType'" -ForegroundColor DarkGray
+                            Write-Verbose "No containers for '$containerType'"
                             continue 
                         }
                     
-                        Write-Host "         -> Found $($containers.Count) container(s) for type '$containerType'" -ForegroundColor DarkGray
+                        Write-Verbose "$($containers.Count) container(s) for '$containerType'"
 
                         # Map container type to workload type
                         $workloadTypeMapping = @{
@@ -233,12 +208,12 @@ function Export-AzureBackupInventory {
                         }
                     }
                     catch {
-                        Write-Host "       [WARN] Could not query container type '$containerType': $($_.Exception.Message)" -ForegroundColor DarkYellow
+                        Write-Warning "Could not query container type '$containerType': $($_.Exception.Message)"
                     }
                 }
 
                 # Also query workload-based items (SQL in VM, SAP HANA) directly
-                Write-Host '       Scanning workload-based items directly...' -ForegroundColor DarkGray
+                Write-Verbose 'Scanning workload-based items...'
                 $workloadTypes = @('AzureVM', 'AzureSQLDatabase', 'AzureFiles', 'MSSQL', 'SAPHanaDatabase')
 
                 $workloadTypeIndex = 0
@@ -255,7 +230,7 @@ function Export-AzureBackupInventory {
                         $wlItems = Get-AzRecoveryServicesBackupItem @workloadParams
 
                         if ($wlItems) {
-                            Write-Host "         -> Found $($wlItems.Count) workload item(s) for type '$wlType'" -ForegroundColor DarkGray
+                            Write-Verbose "$($wlItems.Count) workload item(s) for '$wlType'"
                             Write-Verbose "[LOOP] Processing $($wlItems.Count) workload items for type $wlType"
                             foreach ($item in $wlItems) {
                                 # Avoid duplicates by checking the item ID
@@ -271,12 +246,11 @@ function Export-AzureBackupInventory {
                 }
 
                 if ($allItems.Count -eq 0) {
-                    Write-Host '       No protected items found in this vault.' -ForegroundColor DarkGray
+                    Write-Verbose 'No protected items in this vault.'
                     continue
                 }
 
-                Write-Host "       Found $($allItems.Count) protected item(s)." -ForegroundColor Green
-                Write-Host '       Processing backup items details...' -ForegroundColor DarkGray
+                Write-Host "  $($allItems.Count) item(s) - $($vault.Name)" -ForegroundColor Green
 
                 $itemIndex = 0
                 foreach ($item in $allItems) {
@@ -303,13 +277,11 @@ function Export-AzureBackupInventory {
                     if ($resourceGroup) { $itemDetails += " | RG: $resourceGroup" }
                     if ($resourceName) { $itemDetails += " | ResourceName: $resourceName" }
                     Write-Verbose "[LOOP] Processing backup item $itemIndex of $($allItems.Count): $itemDetails"
-                    # Resolve the backup policy name
                     $policyName = ''
                     if ($item.PolicyId) {
                         $policyName = ($item.PolicyId -split '/')[-1]
                     }
 
-                    # Attempt to get recovery point count
                     $rpCount = 0
                     try {
                         $rpParams = @{
@@ -347,18 +319,12 @@ function Export-AzureBackupInventory {
             }
         }
         catch {
-            Write-Host "  [ERROR] Failed to process subscription '$($sub.Name)': $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host '  Continuing with next subscription...' -ForegroundColor Yellow
+            Write-Warning "Failed on subscription '$($sub.Name)': $($_.Exception.Message)"
         }
     }
 
-    # ---------------------------------------------------------------------------
-    # 4. Find unprotected resources
-    # ---------------------------------------------------------------------------
-    Write-Host ''
-    Write-Host '[INFO] Processing policy statistics and creating links...' -ForegroundColor Yellow
-    
-    # Count resources per policy
+    Write-Verbose 'Processing policy statistics...'
+
     $policyStats = @{}
     foreach ($item in $backupInventory) {
         if ($item.BackupPolicyName -and $item.BackupPolicyName -ne '') {
@@ -369,35 +335,30 @@ function Export-AzureBackupInventory {
             $policyStats[$key]++
         }
     }
-    
-    # Add resource count and hyperlinks to policies
-    for ($i = 0; $i -lt $backupPolicies.Count; $i++) {
-        $policy = $backupPolicies[$i]
+
+    foreach ($policy in $backupPolicies) {
         $key = "$($policy.VaultName)|$($policy.PolicyName)"
         $resourceCount = if ($policyStats.ContainsKey($key)) { $policyStats[$key] } else { 0 }
-        
-        # Create hyperlink to Backup Inventory sheet with visual indicator
+
         $hyperlinkFormula = "=HYPERLINK(`"#'Backup Inventory'!A1`",`"🔗 $($policy.PolicyName)`")"
-        
+
         $policy | Add-Member -NotePropertyName 'ResourceCount' -NotePropertyValue $resourceCount -Force
         $policy | Add-Member -NotePropertyName 'PolicyNameLink' -NotePropertyValue $hyperlinkFormula -Force
     }
-    
-    Write-Host '[INFO] Scanning for unprotected resources...' -ForegroundColor Yellow
-    
-    # Get list of protected resource IDs for comparison
+
+    Write-Verbose 'Scanning for unprotected resources...'
+
     $protectedResourceIds = $backupInventory | Where-Object { $_.SourceResourceId } | Select-Object -ExpandProperty SourceResourceId -Unique
-    
+
     $subIndex = 0
     foreach ($sub in $subscriptions) {
         $subIndex++
-        Write-Host "[PROGRESS] Scanning unprotected resources in subscription $subIndex/$($subscriptions.Count)" -ForegroundColor Magenta
-        
+        Write-Verbose "[$subIndex/$($subscriptions.Count)] $($sub.Name) - unprotected scan"
+
         try {
-            Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
-            
-            # Get all VMs
-            Write-Host '  -> Scanning VMs...' -ForegroundColor DarkGray
+            $null = Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop
+
+            Write-Verbose 'Scanning VMs...'
             $vms = Get-AzVM -ErrorAction SilentlyContinue
             foreach ($vm in $vms) {
                 if ($vm.Id -notin $protectedResourceIds) {
@@ -412,9 +373,8 @@ function Export-AzureBackupInventory {
                         })
                 }
             }
-            
-            # Get all SQL Databases
-            Write-Host '  -> Scanning SQL Databases...' -ForegroundColor DarkGray
+
+            Write-Verbose 'Scanning SQL Databases...'
             $sqlServers = Get-AzSqlServer -ErrorAction SilentlyContinue
             foreach ($server in $sqlServers) {
                 $databases = Get-AzSqlDatabase -ServerName $server.ServerName -ResourceGroupName $server.ResourceGroupName -ErrorAction SilentlyContinue | Where-Object { $_.DatabaseName -ne 'master' }
@@ -432,9 +392,8 @@ function Export-AzureBackupInventory {
                     }
                 }
             }
-            
-            # Get all Storage Accounts
-            Write-Host '  -> Scanning Storage Accounts...' -ForegroundColor DarkGray
+
+            Write-Verbose 'Scanning Storage Accounts...'
             $storageAccounts = Get-AzStorageAccount -ErrorAction SilentlyContinue
             foreach ($storage in $storageAccounts) {
                 if ($storage.Id -notin $protectedResourceIds) {
@@ -449,62 +408,62 @@ function Export-AzureBackupInventory {
                         })
                 }
             }
-            
-            Write-Host "  -> Found $($unprotectedResources.Count) unprotected resources so far" -ForegroundColor DarkGray
+
+            Write-Verbose "$($unprotectedResources.Count) unprotected resources so far"
         }
         catch {
-            Write-Host "  [ERROR] Failed to scan unprotected resources in '$($sub.Name)': $($_.Exception.Message)" -ForegroundColor Red
+            Write-Warning "Failed scanning unprotected resources in '$($sub.Name)': $($_.Exception.Message)"
         }
     }
 
-    # ---------------------------------------------------------------------------
-    # 5. Export all results
-    # ---------------------------------------------------------------------------
-    Write-Host ''
-    
-    # Create policy distribution for export
-    $policyDistribution = $backupInventory | Group-Object BackupPolicyName | ForEach-Object {
-        [PSCustomObject]@{
-            PolicyName    = if ($_.Name) { $_.Name } else { 'No Policy' }
-            ResourceCount = $_.Count
+    [System.Collections.Generic.List[Object]]$policyDistribution = @()
+    foreach ($group in ($backupInventory | Group-Object BackupPolicyName)) {
+        $policyDistribution.Add([PSCustomObject]@{
+                PolicyName    = if ($group.Name) { $group.Name } else { 'No Policy' }
+                ResourceCount = $group.Count
+            })
+    }
+    $policyDistribution = $policyDistribution | Sort-Object ResourceCount -Descending
+
+    if ($ExportToExcel.IsPresent) {
+        $now = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+        $OutputPath = "$($env:USERPROFILE)\$now-Azure_Backup_Global_Report.xlsx"
+
+        if ($backupInventory.Count -eq 0 -and $backupPolicies.Count -eq 0 -and $unprotectedResources.Count -eq 0) {
+            Write-Warning 'No data found. The Excel file will not be created.'
         }
-    } | Sort-Object ResourceCount -Descending
-    
-    if ($backupInventory.Count -eq 0 -and $backupPolicies.Count -eq 0 -and $unprotectedResources.Count -eq 0) {
-        Write-Host '[WARNING] No data found across any subscription.' -ForegroundColor Yellow
-        Write-Host 'The Excel file will not be created.'
+        else {
+            Write-Host "Exporting to: $OutputPath" -ForegroundColor Cyan
+
+            if ($backupInventory.Count -gt 0) {
+                $backupInventory | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Backup Inventory'
+                Write-Verbose "Backup inventory: $($backupInventory.Count) items exported"
+            }
+
+            if ($backupPolicies.Count -gt 0) {
+                $backupPolicies | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Backup Policies'
+                Write-Verbose "Backup policies: $($backupPolicies.Count) exported"
+            }
+
+            if ($unprotectedResources.Count -gt 0) {
+                $unprotectedResources | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Unprotected Resources'
+                Write-Verbose "Unprotected resources: $($unprotectedResources.Count) exported"
+            }
+
+            if ($policyDistribution) {
+                $policyDistribution | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Policy Distribution'
+            }
+
+            Write-Host "Report saved: $OutputPath" -ForegroundColor Green
+            Write-Host "$($backupInventory.Count) backed up | $($backupPolicies.Count) policies | $($unprotectedResources.Count) unprotected" -ForegroundColor Cyan
+        }
     }
     else {
-        Write-Host -ForegroundColor Cyan "Exporting backup information to Excel file: $OutputPath"
-        
-        # Export inventory data
-        if ($backupInventory.Count -gt 0) {
-            $backupInventory | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Backup Inventory'
-            Write-Host "[SUCCESS] Backup inventory exported: $($backupInventory.Count) items" -ForegroundColor Green
+        return @{
+            BackupInventory      = $backupInventory
+            BackupPolicies       = $backupPolicies
+            UnprotectedResources = $unprotectedResources
+            PolicyDistribution   = $policyDistribution
         }
-
-        # Export policies data to a separate worksheet
-        if ($backupPolicies.Count -gt 0) {
-            $backupPolicies | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Backup Policies'
-            Write-Host "[SUCCESS] Backup policies exported: $($backupPolicies.Count) policies" -ForegroundColor Green
-        }
-
-        # Export unprotected resources to a separate worksheet
-        if ($unprotectedResources.Count -gt 0) {
-            $unprotectedResources | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Unprotected Resources'
-            Write-Host "[SUCCESS] Unprotected resources exported: $($unprotectedResources.Count) resources" -ForegroundColor Green
-        }
-
-        # Export policy distribution
-        if ($policyDistribution) {
-            $policyDistribution | Export-Excel -Path $OutputPath -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName 'Policy Distribution'
-            Write-Host '[SUCCESS] Policy distribution exported' -ForegroundColor Green
-        }
-
-        Write-Host "[SUCCESS] Report exported to: $OutputPath" -ForegroundColor Green
-        Write-Host "[INFO] Total items: $($backupInventory.Count) backed up, $($backupPolicies.Count) policies, $($unprotectedResources.Count) unprotected" -ForegroundColor Cyan
     }
-
-    Write-Host ''
-    Write-Host '=== Inventory complete ===' -ForegroundColor Cyan
 }
