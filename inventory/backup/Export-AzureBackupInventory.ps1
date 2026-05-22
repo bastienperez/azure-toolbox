@@ -80,24 +80,57 @@ function Export-AzureBackupInventory {
                             $interval = ''
                             
                             if ($policy.SchedulePolicy) {
-                                $scheduleFrequency = $policy.SchedulePolicy.ScheduleRunFrequency
-                                if ($policy.SchedulePolicy.ScheduleRunTimes) {
-                                    $backupTimes = ($policy.SchedulePolicy.ScheduleRunTimes | ForEach-Object { $_.ToString('HH:mm') }) -join ', '
+                                $sched = $policy.SchedulePolicy
+                                $scheduleFrequency = $sched.ScheduleRunFrequency
+
+                                if ($sched.ScheduleRunTimeZone) {
+                                    $timeZone = $sched.ScheduleRunTimeZone
                                 }
-                                if ($policy.SchedulePolicy.ScheduleRunDays) {
-                                    $scheduleDays = ($policy.SchedulePolicy.ScheduleRunDays) -join ', '
+
+                                # V1 policies (SimpleSchedulePolicy): schedule data lives at the top level.
+                                # V2 policies (SimpleSchedulePolicyV2): schedule data lives in
+                                # DailySchedule / WeeklySchedule / HourlySchedule sub-objects, so the
+                                # top-level ScheduleRunTimes/ScheduleRunDays are empty.
+                                if ($sched.ScheduleRunTimes) {
+                                    $backupTimes = ($sched.ScheduleRunTimes | ForEach-Object { $_.ToString('HH:mm') }) -join ', '
                                 }
-                                if ($policy.SchedulePolicy.ScheduleWindowStartTime) {
-                                    $windowStartTime = $policy.SchedulePolicy.ScheduleWindowStartTime.ToString('HH:mm')
+                                if ($sched.ScheduleRunDays) {
+                                    $scheduleDays = ($sched.ScheduleRunDays) -join ', '
                                 }
-                                if ($policy.SchedulePolicy.ScheduleWindowDuration) {
-                                    $windowDuration = "$($policy.SchedulePolicy.ScheduleWindowDuration) hours"
+                                if ($sched.ScheduleWindowStartTime) {
+                                    $windowStartTime = $sched.ScheduleWindowStartTime.ToString('HH:mm')
                                 }
-                                if ($policy.SchedulePolicy.ScheduleRunTimeZone) {
-                                    $timeZone = $policy.SchedulePolicy.ScheduleRunTimeZone
+                                if ($sched.ScheduleWindowDuration) {
+                                    $windowDuration = "$($sched.ScheduleWindowDuration) hours"
                                 }
-                                if ($policy.SchedulePolicy.ScheduleInterval) {
-                                    $interval = "$($policy.SchedulePolicy.ScheduleInterval) hours"
+                                if ($sched.ScheduleInterval) {
+                                    $interval = "$($sched.ScheduleInterval) hours"
+                                }
+
+                                # V2 Daily/Weekly schedule
+                                if ($sched.DailySchedule -and $sched.DailySchedule.ScheduleRunTimes) {
+                                    $backupTimes = ($sched.DailySchedule.ScheduleRunTimes | ForEach-Object { $_.ToString('HH:mm') }) -join ', '
+                                }
+                                if ($sched.WeeklySchedule) {
+                                    if ($sched.WeeklySchedule.ScheduleRunTimes) {
+                                        $backupTimes = ($sched.WeeklySchedule.ScheduleRunTimes | ForEach-Object { $_.ToString('HH:mm') }) -join ', '
+                                    }
+                                    if ($sched.WeeklySchedule.ScheduleRunDays) {
+                                        $scheduleDays = ($sched.WeeklySchedule.ScheduleRunDays) -join ', '
+                                    }
+                                }
+
+                                # V2 Hourly schedule
+                                if ($sched.HourlySchedule) {
+                                    if ($sched.HourlySchedule.WindowStartTime) {
+                                        $windowStartTime = $sched.HourlySchedule.WindowStartTime.ToString('HH:mm')
+                                    }
+                                    if ($sched.HourlySchedule.WindowDuration) {
+                                        $windowDuration = "$($sched.HourlySchedule.WindowDuration) hours"
+                                    }
+                                    if ($sched.HourlySchedule.Interval) {
+                                        $interval = "$($sched.HourlySchedule.Interval) hours"
+                                    }
                                 }
                             }
 
